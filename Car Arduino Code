@@ -1,0 +1,421 @@
+#include <Servo.h>
+
+// ==================== IR LINE SENSORS ====================
+
+#define RIGHT_IR_SENSOR A0
+#define LEFT_IR_SENSOR  A1
+
+
+// ==================== ULTRASONIC SENSOR & SERVO ====================
+
+const int TRIG_PIN = 11;
+const int ECHO_PIN = 12;
+const int SERVO_PIN = 3;
+
+const int SLOWDOWN_DISTANCE = 35;   // Slow down within 35 cm
+const int OBSTACLE_DISTANCE = 15;  // Stop and avoid within 15 cm
+
+Servo radarServo;
+
+
+// ==================== MOTOR DRIVER ====================
+
+const int RIGHT_MOTOR_ENABLE = 5;
+const int RIGHT_MOTOR_PIN_1 = 7;
+const int RIGHT_MOTOR_PIN_2 = 8;
+
+const int LEFT_MOTOR_ENABLE = 6;
+const int LEFT_MOTOR_PIN_1 = 9;
+const int LEFT_MOTOR_PIN_2 = 10;
+
+
+// ==================== SPEED SETTINGS ====================
+
+int normalSpeed = 110;
+bool emergencyStop = false;
+
+const int SLOW_SPEED = 60;
+const int CLOSE_OBJECT_SPEED = 45;
+
+
+// ==================== LINE TRACKING SETTINGS ====================
+
+const int TURN_REVERSE_SPEED = 60;
+const int TURN_OUTER_BOOST = 40;
+
+
+// ==================== SERVO ANGLES ====================
+
+const int SERVO_CENTER = 90;
+const int SERVO_LEFT = 145;
+const int SERVO_RIGHT = 50;
+
+const int SERVO_DELAY = 200;
+
+
+// ==================== OBSTACLE AVOIDANCE ====================
+
+const int AVOID_TURN_SPEED = 100;
+const int AVOID_TURN_TIME = 500;
+
+const int DIRECTION_PAUSE = 100;
+
+
+// ==================== RETURN TO LINE ====================
+
+const int RETURN_SPEED = 70;
+const unsigned long SEARCH_TIMEOUT = 2000;
+const int CHECK_INTERVAL = 10;
+
+
+// ==================== SETUP ====================
+
+void setup()
+{
+  Serial.begin(9600);
+
+  // Motor pins
+  pinMode(RIGHT_MOTOR_ENABLE, OUTPUT);
+  pinMode(RIGHT_MOTOR_PIN_1, OUTPUT);
+  pinMode(RIGHT_MOTOR_PIN_2, OUTPUT);
+
+  pinMode(LEFT_MOTOR_ENABLE, OUTPUT);
+  pinMode(LEFT_MOTOR_PIN_1, OUTPUT);
+  pinMode(LEFT_MOTOR_PIN_2, OUTPUT);
+
+  // IR sensors
+  pinMode(RIGHT_IR_SENSOR, INPUT);
+  pinMode(LEFT_IR_SENSOR, INPUT);
+
+  // Ultrasonic sensor
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // Servo
+  radarServo.attach(SERVO_PIN);
+  radarServo.write(SERVO_CENTER);
+
+  delay(500);
+
+  // Keep the car stopped when starting
+  rotateMotor(0, 0);
+}
+
+
+// ==================== MAIN LOOP ====================
+
+void loop()
+{
+  // Check for commands from Python
+  if (Serial.available() > 0)
+  {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    if (command == "NORMAL")
+    {
+      normalSpeed = 110;
+      emergencyStop = false;
+    }
+    else if (command == "SLOW")
+    {
+      normalSpeed = SLOW_SPEED;
+      emergencyStop = false;
+    }
+    else if (command == "STOP")
+    {
+      emergencyStop = true;
+    }
+  }
+
+
+  // Check distance in front of the car
+  long frontDistance = getDistance();
+
+
+  // Emergency stop from the drowsiness system
+  if (emergencyStop)
+  {
+    rotateMotor(0, 0);
+  }
+
+
+  // Object detected too close
+  else if (frontDistance > 0 && frontDistance <= OBSTACLE_DISTANCE)
+  {
+    Serial.print("Obstacle detected at ");
+    Serial.print(frontDistance);
+    Serial.println(" cm");
+
+    rotateMotor(0, 0);
+
+    delay(DIRECTION_PAUSE);
+
+    avoidObstacle();
+  }
+
+
+  // Normal driving
+  else
+  {
+    radarServo.write(SERVO_CENTER);
+
+    int currentSpeed = normalSpeed;
+
+    // Slow down when getting close to an object
+    if (frontDistance > 0 && frontDistance <= SLOWDOWN_DISTANCE)
+    {
+      currentSpeed = CLOSE_OBJECT_SPEED;
+    }
+
+
+    // Read the IR sensors
+    int rightIR = digitalRead(RIGHT_IR_SENSOR);
+    int leftIR = digitalRead(LEFT_IR_SENSOR);
+
+
+    // Both sensors detect the line
+    if (rightIR == LOW && leftIR == LOW)
+    {
+      rotateMotor(currentSpeed, currentSpeed);
+    }
+
+
+    // Turn right
+    else if (rightIR == HIGH && leftIR == LOW)
+    {
+      rotateMotor(
+        -TURN_REVERSE_SPEED,
+        currentSpeed + TURN_OUTER_BOOST
+      );
+    }
+
+
+    // Turn left
+    else if (rightIR == LOW && leftIR == HIGH)
+    {
+      rotateMotor(
+        currentSpeed + TURN_OUTER_BOOST,
+        -TURN_REVERSE_SPEED
+      );
+    }
+
+
+    // Both sensors are off the line
+    else
+    {
+      rotateMotor(0, 0);
+    }
+  }
+
+  delay(10);
+}
+
+
+// ==================== AVOID OBSTACLE ====================
+
+void avoidObstacle()
+{
+  // Check the right side
+  radarServo.write(SERVO_RIGHT);
+  delay(SERVO_DELAY);
+
+  long rightDistance = getDistance();
+
+
+  // Check the left side
+  radarServo.write(SERVO_LEFT);
+  delay(SERVO_DELAY);
+
+  long leftDistance = getDistance();
+
+
+  // Return the servo to the center
+  radarServo.write(SERVO_CENTER);
+  delay(SERVO_DELAY);
+
+
+  // Treat no reading as a large distance
+  if (rightDistance == 999)
+  {
+    rightDistance = 500;
+  }
+
+  if (leftDistance == 999)
+  {
+    leftDistance = 500;
+  }
+
+
+  Serial.print("Right: ");
+  Serial.print(rightDistance);
+
+  Serial.print(" cm | Left: ");
+  Serial.print(leftDistance);
+  Serial.println(" cm");
+
+
+  // Choose the side with more space
+  bool turnRight = rightDistance >= leftDistance;
+
+
+  if (turnRight)
+  {
+    Serial.println("Turning right");
+
+    rotateMotor(
+      AVOID_TURN_SPEED,
+      -AVOID_TURN_SPEED
+    );
+  }
+  else
+  {
+    Serial.println("Turning left");
+
+    rotateMotor(
+      -AVOID_TURN_SPEED,
+      AVOID_TURN_SPEED
+    );
+  }
+
+
+  // Give the car time to turn
+  delay(AVOID_TURN_TIME);
+
+
+  // Stop before searching for the line
+  rotateMotor(0, 0);
+  delay(DIRECTION_PAUSE);
+
+
+  Serial.println("Searching for the line...");
+
+
+  unsigned long startTime = millis();
+
+
+  // Search for the line for a maximum of 2 seconds
+  while (millis() - startTime < SEARCH_TIMEOUT)
+  {
+    int rightIR = digitalRead(RIGHT_IR_SENSOR);
+    int leftIR = digitalRead(LEFT_IR_SENSOR);
+
+
+    // Line found
+    if (rightIR == HIGH || leftIR == HIGH)
+    {
+      Serial.println("Line found!");
+
+      break;
+    }
+
+
+    // Check for another obstacle
+    long distance = getDistance();
+
+    if (distance > 0 && distance <= OBSTACLE_DISTANCE)
+    {
+      Serial.println("Another obstacle detected.");
+
+      break;
+    }
+
+
+    // Move slightly toward the chosen direction
+    if (turnRight)
+    {
+      rotateMotor(
+        RETURN_SPEED - 15,
+        RETURN_SPEED + 15
+      );
+    }
+    else
+    {
+      rotateMotor(
+        RETURN_SPEED + 15,
+        RETURN_SPEED - 15
+      );
+    }
+
+    delay(CHECK_INTERVAL);
+  }
+
+
+  // Stop after searching
+  rotateMotor(0, 0);
+}
+
+
+// ==================== GET DISTANCE ====================
+
+long getDistance()
+{
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+
+  long duration = pulseIn(
+    ECHO_PIN,
+    HIGH,
+    25000
+  );
+
+
+  // No object detected
+  if (duration == 0)
+  {
+    return 999;
+  }
+
+
+  // Convert time into distance in centimeters
+  return duration * 0.034 / 2;
+}
+
+
+// ==================== CONTROL MOTORS ====================
+
+void rotateMotor(int rightSpeed, int leftSpeed)
+{
+  // Right motor direction
+  if (rightSpeed < 0)
+  {
+    digitalWrite(RIGHT_MOTOR_PIN_1, LOW);
+    digitalWrite(RIGHT_MOTOR_PIN_2, HIGH);
+  }
+  else
+  {
+    digitalWrite(RIGHT_MOTOR_PIN_1, HIGH);
+    digitalWrite(RIGHT_MOTOR_PIN_2, LOW);
+  }
+
+
+  // Left motor direction
+  if (leftSpeed < 0)
+  {
+    digitalWrite(LEFT_MOTOR_PIN_1, LOW);
+    digitalWrite(LEFT_MOTOR_PIN_2, HIGH);
+  }
+  else
+  {
+    digitalWrite(LEFT_MOTOR_PIN_1, HIGH);
+    digitalWrite(LEFT_MOTOR_PIN_2, LOW);
+  }
+
+
+  // Set motor speeds
+  analogWrite(
+    RIGHT_MOTOR_ENABLE,
+    abs(rightSpeed)
+  );
+
+  analogWrite(
+    LEFT_MOTOR_ENABLE,
+    abs(leftSpeed)
+  );
+}
